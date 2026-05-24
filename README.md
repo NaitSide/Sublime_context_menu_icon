@@ -4,7 +4,8 @@
 
 Работает для файлов, папок и фона папки — правый клик по пустому месту внутри папки.
 
-![Sublime Text Context Menu Icon](screenshot.png)
+![Sublime Text Context Menu Icon](screenshot_gui.png)
+![Sublime Text Context Menu Icon](screenshot_right_mouse.png)
 
 ---
 
