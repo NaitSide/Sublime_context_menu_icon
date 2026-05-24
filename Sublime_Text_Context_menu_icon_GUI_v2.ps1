@@ -91,36 +91,104 @@ function Ensure-SublimeSettingsFile {
     }
 }
 
-function Set-SublimeSettingLine {
-    param(
-        [Parameter(Mandatory = $true)] [string] $Raw,
-        [Parameter(Mandatory = $true)] [string] $Name,
-        [Parameter(Mandatory = $true)] [string] $Value
-    )
+function Repair-SublimeSettingsRaw {
+    param([string]$Raw)
 
-    $escapedName = [regex]::Escape($Name)
-    $pattern = "(?m)^\s*`"$escapedName`"\s*:\s*[^,\r\n]+,?\s*\r?\n?"
-    $Raw = [regex]::Replace($Raw, $pattern, '')
+    if ([string]::IsNullOrWhiteSpace($Raw)) {
+        return "{`r`n}`r`n"
+    }
 
-    $insert = "    `"$Name`": $Value,`r`n"
-    if ($Raw -match "}\s*$") {
-        $Raw = [regex]::Replace($Raw, "}\s*$", "$insert}`r`n")
+    # Нормализуем переносы строк.
+    $Raw = $Raw -replace "`r?`n", "`r`n"
+
+    # Чиним старый баг вида: }//{
+    # Он появлялся, когда старый патчер склеивал два объекта настроек подряд.
+    $Raw = [regex]::Replace($Raw, "(?s)\}\s*//\s*\{", ",`r`n")
+
+    # Убираем случайно закомментированные одиночные фигурные скобки старого патчера.
+    # ВАЖНО: обычные { и } не трогаем.
+    $Raw = [regex]::Replace($Raw, "(?m)^\s*//\s*\{\s*`r?`n", '')
+    $Raw = [regex]::Replace($Raw, "(?m)^\s*//\s*\}\s*`r?`n", '')
+
+    $trimmed = $Raw.Trim()
+
+    # Если файл после старой поломки остался без обертки — возвращаем объект.
+    if (-not $trimmed.StartsWith('{')) {
+        $trimmed = "{`r`n" + $trimmed
     }
-    else {
-        $Raw = "{`r`n$insert}`r`n"
+    if (-not $trimmed.EndsWith('}')) {
+        $trimmed = $trimmed.TrimEnd(',') + "`r`n}"
     }
+
+    return $trimmed + "`r`n"
+}
+
+function Remove-ManagedSettingLines {
+    param([string]$Raw)
+
+    # Удаляем ВСЕ строки, которыми управляет скрипт.
+    # Важно: прежний шаблон был ошибочный: //? требовал минимум один slash,
+    # поэтому обычные строки без // не удалялись и появлялись дубликаты.
+    # Этот шаблон удаляет и активные строки, и закомментированные варианты:
+    #     "hot_exit": false,
+    #     //"hot_exit": false,
+    #     // "hot_exit": false,
+    foreach ($name in @('hot_exit', 'remember_open_files')) {
+        $escapedName = [regex]::Escape($name)
+        $pattern = '(?m)^\s*(?://\s*)?"' + $escapedName + '"\s*:\s*(?:true|false)\s*,?\s*(?:\r?\n|$)'
+        $Raw = [regex]::Replace($Raw, $pattern, '')
+    }
+
     return $Raw
 }
 
-function Remove-SublimeSettingLine {
+function Set-SublimeManagedSettings {
     param(
-        [Parameter(Mandatory = $true)] [string] $Raw,
-        [Parameter(Mandatory = $true)] [string] $Name
+        [string]$Raw,
+        [bool]$Enabled
     )
 
-    $escapedName = [regex]::Escape($Name)
-    $pattern = "(?m)^\s*`"$escapedName`"\s*:\s*[^,\r\n]+,?\s*\r?\n?"
-    return [regex]::Replace($Raw, $pattern, '')
+    # Enabled = true  -> фикс включен: false / false
+    # Enabled = false -> стандартное поведение Sublime: true / true
+    $valueText = if ($Enabled) { 'false' } else { 'true' }
+
+    $Raw = Repair-SublimeSettingsRaw -Raw $Raw
+    $Raw = Remove-ManagedSettingLines -Raw $Raw
+
+    $trimmed = $Raw.TrimEnd()
+    $lastBrace = $trimmed.LastIndexOf('}')
+
+    if ($lastBrace -lt 0) {
+        return "{`r`n    `"hot_exit`": $valueText,`r`n    `"remember_open_files`": $valueText`r`n}`r`n"
+    }
+
+    $beforeClose = $trimmed.Substring(0, $lastBrace).TrimEnd()
+    $afterOpenClean = $beforeClose.Trim()
+
+    # Пустой объект: просто вставляем две строки без ведущей запятой.
+    if ($afterOpenClean -eq '{') {
+        return "{`r`n    `"hot_exit`": $valueText,`r`n    `"remember_open_files`": $valueText`r`n}`r`n"
+    }
+
+    # Если перед вставкой последняя активная настройка без запятой — добавляем запятую.
+    # Не допускаем строку вида
+    # "show_line_endings": true
+    # "hot_exit": false
+    if (-not $beforeClose.EndsWith(',')) {
+        $beforeClose = $beforeClose + ','
+    }
+
+    return $beforeClose + "`r`n    `"hot_exit`": $valueText,`r`n    `"remember_open_files`": $valueText`r`n}`r`n"
+}
+
+function Add-SublimeManagedSettings {
+    param([string]$Raw)
+    return Set-SublimeManagedSettings -Raw $Raw -Enabled $true
+}
+
+function Reset-SublimeManagedSettings {
+    param([string]$Raw)
+    return Set-SublimeManagedSettings -Raw $Raw -Enabled $false
 }
 
 function Apply-SublimeSettings {
@@ -133,8 +201,7 @@ function Apply-SublimeSettings {
     $raw = Get-Content -Path $SETTINGS_PATH -Raw -Encoding UTF8
     if ([string]::IsNullOrWhiteSpace($raw)) { $raw = "{`r`n}`r`n" }
 
-    $raw = Set-SublimeSettingLine -Raw $raw -Name 'hot_exit' -Value 'false'
-    $raw = Set-SublimeSettingLine -Raw $raw -Name 'remember_open_files' -Value 'false'
+    $raw = Add-SublimeManagedSettings -Raw $raw
 
     Set-Content -Path $SETTINGS_PATH -Value $raw -Encoding UTF8
     Add-Log '[OK] Настройки Sublime обновлены'
@@ -151,8 +218,7 @@ function Reset-SublimeSettings {
     Add-Log "[OK] Бэкап настроек: $backupPath"
 
     $raw = Get-Content -Path $SETTINGS_PATH -Raw -Encoding UTF8
-    $raw = Remove-SublimeSettingLine -Raw $raw -Name 'hot_exit'
-    $raw = Remove-SublimeSettingLine -Raw $raw -Name 'remember_open_files'
+    $raw = Reset-SublimeManagedSettings -Raw $raw
 
     Set-Content -Path $SETTINGS_PATH -Value $raw -Encoding UTF8
     Add-Log '[OK] Стандартное поведение Sublime восстановлено'
