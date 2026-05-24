@@ -70,10 +70,12 @@ Open with Sublime Text
 
 Она только возвращает стандартные настройки Sublime:
 
+```text
 {
   "hot_exit": true,
   "remember_open_files": true
 }
+```
 
 То есть:
 
